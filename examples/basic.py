@@ -1,9 +1,14 @@
+import argparse
+
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
 
 
 def main():
-    # port=None 会通过 USB VID/PID 自动查找；也可以写 HidBridgeOptions(port="COM3")
-    with HidBridge(HidBridgeOptions(port=None)) as hid:
+    parser = argparse.ArgumentParser(description="Run a basic RP2350 HID bridge protocol check.")
+    parser.add_argument("--port", default=None, help="serial port such as COM3; auto-detect when omitted")
+    args = parser.parse_args()
+
+    with HidBridge(HidBridgeOptions(port=args.port)) as hid:
         hid.ping()
         print("info:", hid.info().hex(" "))
         print("caps:", hid.caps().hex(" "))

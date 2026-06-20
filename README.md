@@ -1,20 +1,50 @@
 # RP2350 HID Bridge Python SDK
 
-Python SDK for the ExquisiteCore RP2350 KeyMouse Bridge. It talks to the board through the CDC serial command endpoint and the board emits standard USB HID keyboard and mouse reports.
+Python SDK for the ExquisiteCore RP2350 KeyMouse Bridge.
+
+The SDK talks to the board through the CDC serial command endpoint. The board
+then emits standard USB HID keyboard and mouse reports.
+
+## Requirements
+
+```text
+Python 3.10+
+pyserial 3.5+
+Windows COM port for real device control
+```
+
+The package can be installed independently or through the firmware repository
+submodule.
 
 ## Install
 
-From the repository root:
+From this SDK repository:
 
 ```powershell
-pip install -e sdk/python
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -U pip
+.\.venv\Scripts\python -m pip install -e .
 ```
 
-The package depends on `pyserial>=3.5`.
+From the firmware repository:
+
+```powershell
+cd sdk\python
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -U pip
+.\.venv\Scripts\python -m pip install -e .
+```
+
+Run tests:
+
+```powershell
+.\.venv\Scripts\python -m unittest discover -s tests
+```
 
 ## Find The Device
 
-The firmware uses VID/PID `CAFE:2350`. Passing `port=None` enables automatic discovery:
+The firmware uses VID/PID `CAFE:2350`. Passing `port=None` enables automatic
+discovery:
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -23,11 +53,16 @@ with HidBridge(HidBridgeOptions(port=None)) as hid:
     hid.ping()
 ```
 
-List all serial ports:
+List serial ports:
 
 ```powershell
-$env:PYTHONPATH='sdk\python'
-python sdk\python\examples\list_ports.py
+.\.venv\Scripts\python examples\list_ports.py
+```
+
+Run a basic protocol check:
+
+```powershell
+.\.venv\Scripts\python examples\basic.py --port COM3
 ```
 
 ## Direct Control API
@@ -55,13 +90,20 @@ with HidBridge(HidBridgeOptions(port="COM3")) as hid:
     hid.stop_all()
 ```
 
-Common key names include letters, digits, `ENTER`, `ESC`, `TAB`, `SPACE`, `F1`-`F12`, arrows, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `DELETE`, `INSERT`, and punctuation names such as `SLASH`, `DOT`, `COMMA`, `BACKSLASH`.
+Common key names include letters, digits, `ENTER`, `ESC`, `TAB`, `SPACE`,
+`F1`-`F12`, arrows, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `DELETE`, `INSERT`,
+and punctuation names such as `SLASH`, `DOT`, `COMMA`, `BACKSLASH`.
 
-Modifiers are combined with `+`: `CTRL+C`, `SHIFT+F5`, `ALT+TAB`, `WIN+R`.
+Modifiers are combined with `+`:
+
+```text
+CTRL+C
+SHIFT+F5
+ALT+TAB
+WIN+R
+```
 
 ## Script API
-
-Scripts are useful for short batches:
 
 ```python
 script = '''
@@ -92,20 +134,20 @@ stop
 Preview the bundled script without sending input:
 
 ```powershell
-$env:PYTHONPATH='sdk\python'
-python sdk\python\examples\script_demo.py
+.\.venv\Scripts\python examples\script_demo.py
 ```
 
 Send it intentionally:
 
 ```powershell
-$env:PYTHONPATH='sdk\python'
-python sdk\python\examples\script_demo.py --run --port COM3
+.\.venv\Scripts\python examples\script_demo.py --run --port COM3
 ```
 
 ## Error Handling
 
-The client retries `BUSY` responses, raises `RuntimeError` for `NACK`, and raises `TimeoutError` if no matching response frame arrives before the configured timeout.
+The client retries `BUSY` responses, raises `RuntimeError` for `NACK`, and
+raises `TimeoutError` if no matching response frame arrives before the configured
+timeout.
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -119,4 +161,7 @@ except RuntimeError as exc:
     print(f"device/client error: {exc}")
 ```
 
-The examples produce real keyboard and mouse input only when explicitly run against a device. Make sure the active window is safe before sending commands.
+## Notes
+
+The examples produce real keyboard and mouse input only when explicitly run
+against a device. Run them only when the active window is expected.
