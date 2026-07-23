@@ -90,9 +90,9 @@ def parse_combo(input_text: str) -> tuple[int, int]:
                 raise ValueError(f"combo {input_text!r} contains more than one non-modifier key")
             keycode = _parse_keycode(token)
 
-    if keycode is None:
+    if keycode is None and modifier == 0:
         raise ValueError(f"combo {input_text!r} has no key")
-    return modifier, keycode
+    return modifier, keycode or 0
 
 
 def _parse_keycode(key: str) -> int:

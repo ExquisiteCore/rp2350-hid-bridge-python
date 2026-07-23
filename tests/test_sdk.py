@@ -1,8 +1,169 @@
+import inspect
+import threading
+import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from rp2350_hid_bridge import client as client_module
+from rp2350_hid_bridge.client import HidBridge, HidBridgeOptions
 from rp2350_hid_bridge.keys import parse_combo
-from rp2350_hid_bridge.protocol import CommandType, DecodeError, decode_frame, encode_frame
+from rp2350_hid_bridge.protocol import (
+    FLAG_NO_RESPONSE,
+    PROTOCOL_VERSION,
+    CommandType,
+    DecodeError,
+    decode_frame,
+    encode_frame,
+)
 from rp2350_hid_bridge.script import parse_script
+
+HEARTBEAT = CommandType.HEARTBEAT
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 10.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeSerial:
+    def __init__(
+        self,
+        responses_on_command_write=None,
+        *,
+        clock: FakeClock | None = None,
+        auto_ack: bool = False,
+        write_delay: float = 0.0,
+    ):
+        self.responses_on_command_write = list(responses_on_command_write or [])
+        self.clock = clock
+        self.auto_ack = auto_ack
+        self.write_delay = write_delay
+        self.timeout = 1.0
+        self.write_timeout = 1.0
+        self.writes: list[bytes] = []
+        self.read_timeouts: list[float] = []
+        self.read_calls = 0
+        self.flush_calls = 0
+        self.reset_input_buffer_calls = 0
+        self.dtr_history: list[bool] = []
+        self.closed = False
+        self.max_active_writes = 0
+        self.heartbeat_write_entered = threading.Event()
+        self._active_writes = 0
+        self._dtr = False
+        self._read_buffer = bytearray()
+        self._lock = threading.Lock()
+
+    @property
+    def dtr(self) -> bool:
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, value: bool) -> None:
+        self._dtr = bool(value)
+        self.dtr_history.append(self._dtr)
+
+    def write(self, data: bytes) -> int:
+        frame_bytes = bytes(data)
+        frame = decode_frame(frame_bytes)
+        with self._lock:
+            self._active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self._active_writes)
+            self.writes.append(frame_bytes)
+        try:
+            if frame.command_type == HEARTBEAT:
+                self.heartbeat_write_entered.set()
+            if self.write_delay:
+                time.sleep(self.write_delay)
+            if frame.command_type != HEARTBEAT:
+                response = None
+                if self.responses_on_command_write:
+                    response = self.responses_on_command_write.pop(0)
+                elif self.auto_ack:
+                    response = response_frame(frame.sequence, CommandType.ACK)
+                if response:
+                    with self._lock:
+                        self._read_buffer.extend(response)
+        finally:
+            with self._lock:
+                self._active_writes -= 1
+        return len(frame_bytes)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+
+    def read(self, size: int) -> bytes:
+        self.read_calls += 1
+        self.read_timeouts.append(self.timeout)
+        with self._lock:
+            if self._read_buffer:
+                chunk = bytes(self._read_buffer[:size])
+                del self._read_buffer[:size]
+                return chunk
+        if self.clock is not None:
+            self.clock.advance(self.timeout)
+        return b""
+
+    def reset_input_buffer(self) -> None:
+        self.reset_input_buffer_calls += 1
+        with self._lock:
+            self._read_buffer.clear()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class BlockingSerial(FakeSerial):
+    def __init__(self):
+        super().__init__()
+        self.read_started = threading.Event()
+        self.release_read = threading.Event()
+
+    def read(self, size: int) -> bytes:
+        self.read_started.set()
+        self.release_read.wait(2.0)
+        if self.closed:
+            raise OSError("serial port closed")
+        return super().read(size)
+
+    def close(self) -> None:
+        super().close()
+        self.release_read.set()
+
+    def force_unblock(self) -> None:
+        self.closed = True
+        self.release_read.set()
+
+
+def response_frame(sequence: int, command_type: CommandType, payload: bytes = b"") -> bytes:
+    return encode_frame(sequence, command_type, payload)
+
+
+def bridge_with_fake_serial(
+    serial_obj: FakeSerial,
+    *,
+    retries: int = 2,
+    timeout: float = 0.1,
+    clock: FakeClock | None = None,
+) -> HidBridge:
+    clock = clock or FakeClock()
+    bridge = HidBridge(HidBridgeOptions(port="FAKE", retries=retries, timeout=timeout))
+    bridge._monotonic = clock.monotonic
+    bridge._sleep = clock.sleep
+    bridge._serial = serial_obj
+    return bridge
 
 
 class ProtocolTests(unittest.TestCase):
@@ -10,10 +171,35 @@ class ProtocolTests(unittest.TestCase):
         frame = encode_frame(0x1234, CommandType.PING, b"")
         decoded = decode_frame(frame)
 
-        self.assertEqual(decoded.version, 1)
+        self.assertEqual(decoded.version, PROTOCOL_VERSION)
         self.assertEqual(decoded.sequence, 0x1234)
         self.assertEqual(decoded.command_type, CommandType.PING)
         self.assertEqual(decoded.payload, b"")
+
+    def test_v2_heartbeat_frame_carries_no_response_flag(self):
+        self.assertEqual(PROTOCOL_VERSION, 2)
+        self.assertEqual(CommandType.HEARTBEAT, 0x04)
+        self.assertIn("flags", inspect.signature(encode_frame).parameters)
+        frame = encode_frame(0, HEARTBEAT, flags=FLAG_NO_RESPONSE)
+        decoded = decode_frame(frame)
+
+        self.assertEqual(decoded.version, 2)
+        self.assertEqual(decoded.flags, FLAG_NO_RESPONSE)
+        self.assertEqual(decoded.sequence, 0)
+        self.assertEqual(decoded.command_type, HEARTBEAT)
+
+    def test_flags_are_covered_by_crc(self):
+        self.assertIn("flags", inspect.signature(encode_frame).parameters)
+        frame = bytearray(encode_frame(0, HEARTBEAT, flags=FLAG_NO_RESPONSE))
+        frame[3] = 0
+
+        with self.assertRaises(DecodeError):
+            decode_frame(frame)
+
+    def test_legacy_version_frame_still_decodes(self):
+        frame = encode_frame(7, CommandType.PING, version=1)
+
+        self.assertEqual(decode_frame(frame).version, 1)
 
     def test_bad_crc_is_rejected(self):
         frame = bytearray(encode_frame(7, CommandType.PING, b""))
@@ -27,6 +213,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(parse_combo("SHIFT+R"), (0x02, 0x15))
         self.assertEqual(parse_combo("ENTER"), (0x00, 0x28))
         self.assertEqual(parse_combo("F5"), (0x00, 0x3E))
+
+    def test_modifier_only_combos_use_zero_keycode(self):
+        self.assertEqual(parse_combo("SHIFT"), (0x02, 0x00))
+        self.assertEqual(parse_combo("CTRL+SHIFT"), (0x03, 0x00))
+
+    def test_more_than_one_non_modifier_key_remains_invalid(self):
+        with self.assertRaises(ValueError):
+            parse_combo("CTRL+A+B")
+
+    def test_script_parser_accepts_modifier_only_combo(self):
+        commands = parse_script("key down CTRL+SHIFT\nkey up CTRL+SHIFT")
+
+        self.assertEqual(commands[0].combo, (0x03, 0x00))
+        self.assertEqual(commands[1].combo, (0x03, 0x00))
 
     def test_script_parser(self):
         commands = parse_script(
@@ -51,6 +251,218 @@ stop
         self.assertEqual(commands[3].kind, "wait")
         self.assertEqual(commands[3].ms, 100)
         self.assertEqual(commands[4].kind, "stop")
+
+
+class RetryTests(unittest.TestCase):
+    def test_nack_is_terminal_and_is_written_once(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial(
+            [response_frame(1, CommandType.NACK, b"\x0f")], clock=clock
+        )
+        bridge = bridge_with_fake_serial(serial_obj, retries=3, clock=clock)
+
+        with self.assertRaisesRegex(RuntimeError, "15"):
+            bridge.key_down("W")
+
+        self.assertEqual(len(serial_obj.writes), 1)
+
+    def test_timeout_retry_reuses_exact_preencoded_frame_and_sequence(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial(
+            [None, response_frame(1, CommandType.ACK)], clock=clock
+        )
+        bridge = bridge_with_fake_serial(serial_obj, retries=1, clock=clock)
+
+        bridge.key_down("W")
+
+        self.assertEqual(len(serial_obj.writes), 2)
+        self.assertEqual(serial_obj.writes[0], serial_obj.writes[1])
+        self.assertEqual(decode_frame(serial_obj.writes[0]).sequence, 1)
+        self.assertEqual(serial_obj.reset_input_buffer_calls, 0)
+
+    def test_busy_uses_reason_delay_and_retries_exact_frame(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial(
+            [
+                response_frame(1, CommandType.BUSY, b"\x03\x00\x19"),
+                response_frame(1, CommandType.ACK),
+            ],
+            clock=clock,
+        )
+        bridge = bridge_with_fake_serial(serial_obj, retries=1, clock=clock)
+
+        bridge.key_down("W")
+
+        self.assertEqual(clock.sleeps, [0.025])
+        self.assertEqual(serial_obj.writes[0], serial_obj.writes[1])
+        self.assertEqual(serial_obj.reset_input_buffer_calls, 0)
+
+    def test_stale_response_is_ignored_without_clearing_input(self):
+        clock = FakeClock()
+        responses = response_frame(99, CommandType.ACK) + response_frame(1, CommandType.ACK)
+        serial_obj = FakeSerial([responses], clock=clock)
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, clock=clock)
+
+        bridge.ping()
+
+        self.assertEqual(len(serial_obj.writes), 1)
+        self.assertEqual(serial_obj.reset_input_buffer_calls, 0)
+
+
+class DeadlineTests(unittest.TestCase):
+    def _bridge(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial(clock=clock, auto_ack=True)
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, timeout=0.1, clock=clock)
+        return bridge, serial_obj
+
+    def test_ordinary_command_has_one_second_minimum_deadline(self):
+        bridge, serial_obj = self._bridge()
+
+        bridge.ping()
+
+        self.assertAlmostEqual(serial_obj.read_timeouts[-1], 1.0)
+
+    def test_wait_deadline_includes_requested_duration_and_margin(self):
+        bridge, serial_obj = self._bridge()
+
+        bridge.wait_ms(2500)
+
+        self.assertAlmostEqual(serial_obj.read_timeouts[-1], 3.0)
+
+    def test_text_deadline_uses_character_count_and_tap_delay(self):
+        bridge, serial_obj = self._bridge()
+
+        bridge.type_text("abcdefghij")
+
+        self.assertAlmostEqual(serial_obj.read_timeouts[-1], 0.58)
+
+    def test_mouse_deadline_uses_split_report_step_estimate(self):
+        bridge, serial_obj = self._bridge()
+
+        bridge.mouse_move(300, -300)
+
+        self.assertAlmostEqual(serial_obj.read_timeouts[-1], 0.503)
+
+    def test_batch_end_deadline_uses_accumulated_known_duration(self):
+        bridge, serial_obj = self._bridge()
+
+        bridge.run_script('type "abcdefghij"\nmouse move 300 -300\nwait 2500')
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        batch_end_index = commands.index(CommandType.BATCH_END)
+        self.assertEqual(
+            commands,
+            [
+                CommandType.BATCH_BEGIN,
+                CommandType.TYPE_ASCII,
+                CommandType.MOUSE_MOVE_REL,
+                CommandType.WAIT_MS,
+                CommandType.BATCH_END,
+            ],
+        )
+        self.assertAlmostEqual(serial_obj.read_timeouts[batch_end_index], 3.583)
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_open_heartbeat_and_close_lifecycle(self):
+        self.assertEqual(client_module.HEARTBEAT_INTERVAL_SECONDS, 0.5)
+        serial_obj = FakeSerial(auto_ack=True)
+        serial_module = SimpleNamespace(Serial=lambda **_kwargs: serial_obj)
+        bridge = HidBridge(HidBridgeOptions(port="FAKE", timeout=0.05, retries=0))
+
+        with (
+            patch("rp2350_hid_bridge.client._serial_module", return_value=serial_module),
+            patch("rp2350_hid_bridge.client.HEARTBEAT_INTERVAL_SECONDS", 0.01, create=True),
+        ):
+            bridge.open()
+            self.assertTrue(serial_obj.heartbeat_write_entered.wait(1.0))
+            heartbeat_thread = bridge._heartbeat_thread
+            reads_before_close = serial_obj.read_calls
+
+            heartbeat_frames = [
+                decode_frame(frame)
+                for frame in serial_obj.writes
+                if decode_frame(frame).command_type == HEARTBEAT
+            ]
+            self.assertTrue(heartbeat_frames)
+            self.assertTrue(all(frame.sequence == 0 for frame in heartbeat_frames))
+            self.assertTrue(all(frame.flags == FLAG_NO_RESPONSE for frame in heartbeat_frames))
+            self.assertEqual(reads_before_close, 0)
+
+            bridge.close()
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertIn(CommandType.STOP_ALL, commands)
+        self.assertEqual(serial_obj.dtr_history, [True, False])
+        self.assertTrue(serial_obj.closed)
+        self.assertIsNotNone(heartbeat_thread)
+        self.assertFalse(heartbeat_thread.is_alive())
+        writes_after_close = len(serial_obj.writes)
+        time.sleep(0.03)
+        self.assertEqual(len(serial_obj.writes), writes_after_close)
+
+    def test_command_and_heartbeat_writes_are_serialized(self):
+        serial_obj = FakeSerial(auto_ack=True, write_delay=0.03)
+        serial_module = SimpleNamespace(Serial=lambda **_kwargs: serial_obj)
+        bridge = HidBridge(HidBridgeOptions(port="FAKE", timeout=0.1, retries=0))
+
+        with (
+            patch("rp2350_hid_bridge.client._serial_module", return_value=serial_module),
+            patch("rp2350_hid_bridge.client.HEARTBEAT_INTERVAL_SECONDS", 0.001, create=True),
+        ):
+            bridge.open()
+            self.assertTrue(serial_obj.heartbeat_write_entered.wait(1.0))
+            bridge.ping()
+            bridge.close()
+
+        self.assertEqual(serial_obj.max_active_writes, 1)
+
+    def test_close_remains_best_effort_when_stop_all_fails(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial([response_frame(1, CommandType.NACK, b"\x07")], clock=clock)
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, clock=clock)
+        bridge._heartbeat_thread = None
+
+        bridge.close()
+
+        self.assertEqual(decode_frame(serial_obj.writes[0]).command_type, CommandType.STOP_ALL)
+        self.assertEqual(serial_obj.dtr_history, [False])
+        self.assertTrue(serial_obj.closed)
+
+    def test_close_sends_stop_without_waiting_for_active_command(self):
+        serial_obj = BlockingSerial()
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, timeout=0.1)
+        command_errors: list[Exception] = []
+        close_done = threading.Event()
+
+        def run_wait() -> None:
+            try:
+                bridge.wait_ms(60_000)
+            except Exception as exc:
+                command_errors.append(exc)
+
+        command_thread = threading.Thread(target=run_wait)
+        close_thread = threading.Thread(
+            target=lambda: (bridge.close(), close_done.set())
+        )
+        command_thread.start()
+        self.assertTrue(serial_obj.read_started.wait(1.0))
+        close_thread.start()
+
+        try:
+            self.assertTrue(
+                close_done.wait(0.2),
+                "close queued behind the active long-running command",
+            )
+        finally:
+            serial_obj.force_unblock()
+            command_thread.join(1.0)
+            close_thread.join(1.0)
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertIn(CommandType.STOP_ALL, commands)
+        self.assertTrue(command_errors)
 
 
 if __name__ == "__main__":

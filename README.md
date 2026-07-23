@@ -21,24 +21,19 @@ submodule.
 From this SDK repository:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -U pip
-.\.venv\Scripts\python -m pip install -e .
+uv sync
 ```
 
 From the firmware repository:
 
 ```powershell
-cd sdk\python
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -U pip
-.\.venv\Scripts\python -m pip install -e .
+uv sync --project sdk/python
 ```
 
 Run tests:
 
 ```powershell
-.\.venv\Scripts\python -m unittest discover -s tests
+uv run --project sdk/python python -m unittest discover -s sdk/python/tests -v
 ```
 
 ## Find The Device
@@ -103,6 +98,11 @@ ALT+TAB
 WIN+R
 ```
 
+Modifiers may also be sent without an ordinary key. For example,
+`key_down("SHIFT")` and `key_down("CTRL+SHIFT")` encode a zero keycode with
+the requested modifier mask. A combo may contain at most one ordinary key;
+use multiple `key_down` calls for simultaneous ordinary keys.
+
 ## Script API
 
 ```python
@@ -145,9 +145,20 @@ Send it intentionally:
 
 ## Error Handling
 
-The client retries `BUSY` responses, raises `RuntimeError` for `NACK`, and
-raises `TimeoutError` if no matching response frame arrives before the configured
-timeout.
+Protocol v2 retries only timeouts and `BUSY` responses. Every retry reuses the
+exact original sequence and encoded frame so firmware replay protection can
+distinguish a retry from a new action. A `BUSY` payload contains a one-byte
+reason followed by a two-byte big-endian retry delay in milliseconds; the SDK
+uses that advertised delay. `NACK`, serial errors, and unexpected response
+types are terminal. Malformed frames are discarded while the stream parser
+resynchronizes; if no valid matching response arrives, normal timeout retry
+policy applies. `NACK` errors include the decoded firmware error name and
+number.
+
+Matching responses are read without clearing the serial input buffer. Complete
+responses for stale sequences are ignored, so an old response cannot satisfy
+the current request. A timeout raises `TimeoutError` after all configured retry
+attempts.
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -161,7 +172,27 @@ except RuntimeError as exc:
     print(f"device/client error: {exc}")
 ```
 
+Read deadlines account for device-side execution: ordinary commands allow at
+least one second, waits include the requested duration plus a transport margin,
+typing uses the character count and firmware tap delay, large mouse movement
+uses its split HID report count, and `BATCH_END` includes the accumulated known
+duration of the collected script.
+
+## Protocol v2 Safety Lease
+
+While the port is open, the SDK sends a serialized sequence-zero `HEARTBEAT`
+frame with the `NO_RESPONSE` flag every 500 ms. Heartbeats share the command
+write lock and never read a response. They maintain the firmware's two-second
+control lease; loss of the process, serial connection, or heartbeats causes the
+firmware to release held input.
+
+Opening explicitly asserts DTR. Orderly close sends `STOP_ALL` best-effort while
+the transport is still usable, stops and joins the heartbeat worker, deasserts
+DTR, and then closes the serial port.
+
 ## Notes
 
-The examples produce real keyboard and mouse input only when explicitly run
-against a device. Run them only when the active window is expected.
+`TYPE_ASCII` and the script `type` command support US-keyboard ASCII only; they
+do not provide Unicode or layout-independent text entry. The examples produce
+real keyboard and mouse input only when explicitly run against a device. Run
+them only when the active window is expected.

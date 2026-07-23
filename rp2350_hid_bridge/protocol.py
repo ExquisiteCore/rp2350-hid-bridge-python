@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 MAGIC = b"\xA5\x5A"
-PROTOCOL_VERSION = 1
+LEGACY_PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+FLAG_NO_RESPONSE = 0x01
 MAX_PAYLOAD_SIZE = 240
 FRAME_OVERHEAD = 11
 MAX_FRAME_SIZE = FRAME_OVERHEAD + MAX_PAYLOAD_SIZE
@@ -14,6 +16,7 @@ class CommandType(IntEnum):
     PING = 0x01
     GET_INFO = 0x02
     GET_CAPS = 0x03
+    HEARTBEAT = 0x04
     KEY_DOWN = 0x10
     KEY_UP = 0x11
     KEY_TAP = 0x12
@@ -58,6 +61,7 @@ def encode_frame(
     command_type: CommandType | int,
     payload: bytes = b"",
     version: int = PROTOCOL_VERSION,
+    flags: int = 0,
 ) -> bytes:
     if len(payload) > MAX_PAYLOAD_SIZE:
         raise ValueError(f"payload is {len(payload)} bytes, max is {MAX_PAYLOAD_SIZE}")
@@ -65,7 +69,7 @@ def encode_frame(
     header = bytearray(FRAME_OVERHEAD + len(payload))
     header[0:2] = MAGIC
     header[2] = version & 0xFF
-    header[3] = 0
+    header[3] = flags & 0xFF
     header[4:6] = int(sequence).to_bytes(2, "big")
     header[6] = int(command_type) & 0xFF
     header[7:9] = len(payload).to_bytes(2, "big")
