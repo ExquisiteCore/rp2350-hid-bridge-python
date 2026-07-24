@@ -177,8 +177,13 @@ class HidBridge:
         payload: bytes = b"",
         *,
         allow_closing: bool = False,
+        expected_generation: int | None = None,
     ) -> Response:
-        generation = self._lifecycle_generation
+        generation = (
+            self._lifecycle_generation
+            if expected_generation is None
+            else expected_generation
+        )
         with self._command_lock:
             self._ensure_session_generation(generation)
             serial_obj = self._require_open(allow_closing=allow_closing)
@@ -221,8 +226,10 @@ class HidBridge:
                         f"unexpected response {response.command_type}, expected {expected}"
                     )
 
-                self._record_completed_command(command_type, payload)
-                return response
+                with self._lifecycle_lock:
+                    self._ensure_session(serial_obj, generation)
+                    self._record_completed_command(command_type, payload)
+                    return response
 
         raise RuntimeError("command failed")
 
@@ -277,34 +284,58 @@ class HidBridge:
                 segment: list[ScriptCommand] = []
                 for command in commands:
                     if command.kind == "stop":
-                        self._execute_script_batch(segment)
+                        self._execute_script_batch(segment, generation)
                         segment.clear()
-                        self.stop_all()
+                        self._send_command(
+                            CommandType.STOP_ALL,
+                            expected_generation=generation,
+                        )
                     else:
                         segment.append(command)
-                self._execute_script_batch(segment)
+                self._execute_script_batch(segment, generation)
             except Exception:
                 try:
-                    self.stop_all()
+                    self._send_command(
+                        CommandType.STOP_ALL,
+                        expected_generation=generation,
+                    )
                 except Exception:
                     pass
                 raise
 
-    def _execute_script_batch(self, commands: list[ScriptCommand]) -> None:
+    def _execute_script_batch(
+        self,
+        commands: list[ScriptCommand],
+        expected_generation: int,
+    ) -> None:
         if not commands:
             return
-        self.send_command(CommandType.BATCH_BEGIN)
+        self._send_command(
+            CommandType.BATCH_BEGIN,
+            expected_generation=expected_generation,
+        )
         for command in commands:
-            self._execute_script_command(command)
-        self.send_command(CommandType.BATCH_END)
+            self._execute_script_command(command, expected_generation)
+        self._send_command(
+            CommandType.BATCH_END,
+            expected_generation=expected_generation,
+        )
 
     def _send_key(self, command_type: CommandType, combo: str) -> None:
         modifier, keycode = parse_combo(combo)
         self.send_command(command_type, bytes([modifier, keycode]))
 
-    def _execute_script_command(self, command: ScriptCommand) -> None:
+    def _execute_script_command(
+        self,
+        command: ScriptCommand,
+        expected_generation: int,
+    ) -> None:
         if command.kind == "type" and command.text is not None:
-            self.type_text(command.text)
+            self._send_command(
+                CommandType.TYPE_ASCII,
+                ascii_payload(command.text),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "key" and command.action and command.combo:
             combo = bytes(command.combo)
             command_type = {
@@ -312,21 +343,52 @@ class HidBridge:
                 "down": CommandType.KEY_DOWN,
                 "up": CommandType.KEY_UP,
             }[command.action]
-            self.send_command(command_type, combo)
+            self._send_command(
+                command_type,
+                combo,
+                expected_generation=expected_generation,
+            )
         elif command.kind == "mouse" and command.action == "move":
-            self.mouse_move(command.dx or 0, command.dy or 0)
+            self._send_command(
+                CommandType.MOUSE_MOVE_REL,
+                i16_pair_payload(command.dx or 0, command.dy or 0),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "mouse" and command.action == "click":
-            self.send_command(CommandType.MOUSE_CLICK, byte_payload(command.button or 0))
+            self._send_command(
+                CommandType.MOUSE_CLICK,
+                byte_payload(command.button or 0),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "mouse" and command.action == "down":
-            self.send_command(CommandType.MOUSE_BUTTON_DOWN, byte_payload(command.button or 0))
+            self._send_command(
+                CommandType.MOUSE_BUTTON_DOWN,
+                byte_payload(command.button or 0),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "mouse" and command.action == "up":
-            self.send_command(CommandType.MOUSE_BUTTON_UP, byte_payload(command.button or 0))
+            self._send_command(
+                CommandType.MOUSE_BUTTON_UP,
+                byte_payload(command.button or 0),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "mouse" and command.action == "wheel":
-            self.mouse_wheel(command.delta or 0)
+            self._send_command(
+                CommandType.MOUSE_WHEEL,
+                byte_payload(command.delta or 0),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "wait" and command.ms is not None:
-            self.wait_ms(command.ms)
+            self._send_command(
+                CommandType.WAIT_MS,
+                u32_payload(command.ms),
+                expected_generation=expected_generation,
+            )
         elif command.kind == "stop":
-            self.stop_all()
+            self._send_command(
+                CommandType.STOP_ALL,
+                expected_generation=expected_generation,
+            )
         else:
             raise ValueError(f"unsupported script command {command}")
 

@@ -706,10 +706,10 @@ class ScriptExecutionTests(unittest.TestCase):
         thread_errors: list[Exception] = []
         original_execute = bridge._execute_script_command
 
-        def delayed_execute(command) -> None:
+        def delayed_execute(command, *args, **kwargs) -> None:
             script_at_first_command.set()
             release_script.wait(1.0)
-            original_execute(command)
+            original_execute(command, *args, **kwargs)
 
         bridge._execute_script_command = delayed_execute
 
@@ -746,6 +746,93 @@ class ScriptExecutionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(thread_errors, [])
+
+    def test_close_reopen_prevents_old_script_from_continuing_on_new_session(self):
+        old_serial = BatchAwareFakeSerial()
+        new_serial = BatchAwareFakeSerial()
+        serial_module = SimpleNamespace(Serial=lambda **_kwargs: new_serial)
+        bridge = bridge_with_fake_serial(old_serial, retries=0, timeout=0.1)
+        script_paused = threading.Event()
+        release_script = threading.Event()
+        script_errors: list[Exception] = []
+        original_execute = bridge._execute_script_command
+
+        def delayed_execute(command, *args, **kwargs) -> None:
+            script_paused.set()
+            release_script.wait(1.0)
+            original_execute(command, *args, **kwargs)
+
+        bridge._execute_script_command = delayed_execute
+
+        def run_script() -> None:
+            try:
+                bridge.run_script('type "abc"')
+            except Exception as exc:
+                script_errors.append(exc)
+
+        script_thread = threading.Thread(target=run_script)
+        script_thread.start()
+        self.assertTrue(script_paused.wait(1.0))
+
+        with (
+            patch("rp2350_hid_bridge.client._serial_module", return_value=serial_module),
+            patch("rp2350_hid_bridge.client.HEARTBEAT_INTERVAL_SECONDS", 10.0),
+        ):
+            bridge.close()
+            bridge.open()
+            release_script.set()
+            script_thread.join(1.0)
+            new_commands = [
+                decode_frame(frame).command_type for frame in new_serial.writes
+            ]
+            bridge.close()
+
+        self.assertEqual(new_commands, [])
+        self.assertTrue(script_errors)
+        self.assertIn("session changed", str(script_errors[0]))
+
+    def test_close_reopen_prevents_old_ack_from_mutating_new_batch_state(self):
+        old_serial = FakeSerial(auto_ack=True)
+        new_serial = FakeSerial(auto_ack=True)
+        serial_module = SimpleNamespace(Serial=lambda **_kwargs: new_serial)
+        bridge = bridge_with_fake_serial(old_serial, retries=0, timeout=0.1)
+        response_received = threading.Event()
+        release_response = threading.Event()
+        command_errors: list[Exception] = []
+        original_read_response = bridge._read_response
+
+        def delayed_response(*args, **kwargs):
+            response = original_read_response(*args, **kwargs)
+            response_received.set()
+            release_response.wait(1.0)
+            return response
+
+        bridge._read_response = delayed_response
+
+        def begin_batch() -> None:
+            try:
+                bridge.send_command(CommandType.BATCH_BEGIN)
+            except Exception as exc:
+                command_errors.append(exc)
+
+        command_thread = threading.Thread(target=begin_batch)
+        command_thread.start()
+        self.assertTrue(response_received.wait(1.0))
+
+        with (
+            patch("rp2350_hid_bridge.client._serial_module", return_value=serial_module),
+            patch("rp2350_hid_bridge.client.HEARTBEAT_INTERVAL_SECONDS", 10.0),
+        ):
+            bridge.close()
+            bridge.open()
+            release_response.set()
+            command_thread.join(1.0)
+            reopened_batch_duration = bridge._batch_duration_seconds
+            bridge.close()
+
+        self.assertIsNone(reopened_batch_duration)
+        self.assertTrue(command_errors)
+        self.assertIn("session changed", str(command_errors[0]))
 
 
 class LifecycleTests(unittest.TestCase):
