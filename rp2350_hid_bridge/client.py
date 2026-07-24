@@ -31,6 +31,7 @@ TRANSPORT_MARGIN_SECONDS = 0.5
 KEY_TAP_DELAY_SECONDS = 0.008
 MOUSE_CLICK_DELAY_SECONDS = 0.020
 MOUSE_REPORT_ESTIMATE_SECONDS = 0.001
+RETRY_SLEEP_SLICE_SECONDS = 0.05
 
 _NACK_ERROR_NAMES = {
     1: "bad frame",
@@ -82,12 +83,13 @@ class HidBridge:
         self._monotonic = monotonic or time.monotonic
         self._sleep = sleep or time.sleep
         self._write_lock = threading.Lock()
-        self._command_lock = threading.Lock()
+        self._command_lock = threading.RLock()
         self._sequence_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._closing = False
+        self._lifecycle_generation = 0
         self._receive_buffer = bytearray()
         self._batch_duration_seconds: float | None = None
 
@@ -102,6 +104,8 @@ class HidBridge:
         with self._lifecycle_lock:
             if self._serial is not None:
                 return
+            if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+                raise RuntimeError("previous heartbeat worker is still stopping")
 
             serial_mod = _serial_module()
             port = self.options.port or find_port(self.options.vid, self.options.pid)
@@ -119,12 +123,15 @@ class HidBridge:
                 serial_obj.close()
                 raise
 
+            self._lifecycle_generation += 1
+            generation = self._lifecycle_generation
+            self._receive_buffer = bytearray()
             self._serial = serial_obj
             self._closing = False
-            self._receive_buffer.clear()
             self._heartbeat_stop.clear()
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop,
+                args=(serial_obj, generation),
                 name="rp2350-hid-heartbeat",
                 daemon=True,
             )
@@ -138,25 +145,28 @@ class HidBridge:
             if self._closing:
                 return
             self._closing = True
+            self._lifecycle_generation += 1
+            self._heartbeat_stop.set()
 
             try:
-                try:
-                    self._write_stop_all_best_effort(serial_obj)
-                except Exception:
-                    pass
+                with self._write_lock:
+                    try:
+                        self._write_stop_all_best_effort(serial_obj)
+                    except Exception:
+                        pass
+                    try:
+                        _set_dtr(serial_obj, False)
+                    except Exception:
+                        pass
+                    try:
+                        serial_obj.close()
+                    finally:
+                        self._serial = None
+                        self._receive_buffer = bytearray()
+                        self._batch_duration_seconds = None
             finally:
                 self._stop_heartbeat()
-                try:
-                    _set_dtr(serial_obj, False)
-                except Exception:
-                    pass
-                try:
-                    serial_obj.close()
-                finally:
-                    self._serial = None
-                    self._receive_buffer.clear()
-                    self._batch_duration_seconds = None
-                    self._closing = False
+                self._closing = False
 
     def send_command(self, command_type: CommandType, payload: bytes = b"") -> Response:
         return self._send_command(command_type, payload)
@@ -168,16 +178,25 @@ class HidBridge:
         *,
         allow_closing: bool = False,
     ) -> Response:
+        generation = self._lifecycle_generation
         with self._command_lock:
+            self._ensure_session_generation(generation)
             serial_obj = self._require_open(allow_closing=allow_closing)
+            receive_buffer = self._receive_buffer
             sequence = self._next_sequence()
             frame = encode_frame(sequence, command_type, payload)
             response_timeout = self._response_timeout(command_type, payload)
 
             for attempt in range(self.options.retries + 1):
-                self._write_frame(serial_obj, frame)
+                self._write_frame(serial_obj, frame, generation)
                 try:
-                    response = self._read_response(serial_obj, sequence, response_timeout)
+                    response = self._read_response(
+                        serial_obj,
+                        sequence,
+                        response_timeout,
+                        generation,
+                        receive_buffer,
+                    )
                 except TimeoutError:
                     if attempt >= self.options.retries:
                         raise
@@ -190,7 +209,7 @@ class HidBridge:
                         raise RuntimeError(
                             f"device remained BUSY ({reason_name}, reason {reason})"
                         )
-                    self._sleep(retry_seconds)
+                    self._wait_for_retry(retry_seconds, serial_obj, generation)
                     continue
 
                 if response.command_type == CommandType.NACK:
@@ -250,21 +269,25 @@ class HidBridge:
         self.send_command(CommandType.STOP_ALL)
 
     def run_script(self, text: str) -> None:
-        commands = parse_script(text)
-        try:
-            segment: list[ScriptCommand] = []
-            for command in commands:
-                if command.kind == "stop":
-                    self._execute_script_batch(segment)
-                    segment.clear()
-                    self.stop_all()
-                else:
-                    segment.append(command)
-            self._execute_script_batch(segment)
-        except Exception:
+        generation = self._lifecycle_generation
+        with self._command_lock:
+            self._ensure_session_generation(generation)
+            commands = parse_script(text)
             try:
-                self.stop_all()
-            finally:
+                segment: list[ScriptCommand] = []
+                for command in commands:
+                    if command.kind == "stop":
+                        self._execute_script_batch(segment)
+                        segment.clear()
+                        self.stop_all()
+                    else:
+                        segment.append(command)
+                self._execute_script_batch(segment)
+            except Exception:
+                try:
+                    self.stop_all()
+                except Exception:
+                    pass
                 raise
 
     def _execute_script_batch(self, commands: list[ScriptCommand]) -> None:
@@ -307,25 +330,30 @@ class HidBridge:
         else:
             raise ValueError(f"unsupported script command {command}")
 
-    def _write_frame(self, serial_obj, frame: bytes) -> None:
+    def _write_frame(self, serial_obj, frame: bytes, generation: int) -> None:
         with self._write_lock:
+            self._ensure_session(serial_obj, generation)
             serial_obj.write(frame)
             serial_obj.flush()
 
     def _write_stop_all_best_effort(self, serial_obj) -> None:
         sequence = self._next_sequence()
         frame = encode_frame(sequence, CommandType.STOP_ALL)
-        self._write_frame(serial_obj, frame)
+        serial_obj.write(frame)
+        serial_obj.flush()
 
     def _read_response(
         self,
         serial_obj,
         expected_sequence: int,
         timeout_seconds: float,
+        generation: int,
+        receive_buffer: bytearray,
     ) -> Response:
         deadline = self._monotonic() + timeout_seconds
         while True:
-            response = _try_decode_response(self._receive_buffer, expected_sequence)
+            self._ensure_session(serial_obj, generation)
+            response = _try_decode_response(receive_buffer, expected_sequence)
             if response is not None:
                 return response
 
@@ -335,7 +363,25 @@ class HidBridge:
             serial_obj.timeout = remaining
             chunk = serial_obj.read(64)
             if chunk:
-                self._receive_buffer.extend(chunk)
+                self._ensure_session(serial_obj, generation)
+                receive_buffer.extend(chunk)
+
+    def _wait_for_retry(
+        self,
+        delay_seconds: float,
+        serial_obj,
+        generation: int,
+    ) -> None:
+        remaining = max(0.0, delay_seconds)
+        while True:
+            self._ensure_session(serial_obj, generation)
+            if remaining <= 0:
+                return
+            sleep_for = min(remaining, RETRY_SLEEP_SLICE_SECONDS)
+            before = self._monotonic()
+            self._sleep(sleep_for)
+            elapsed = max(0.0, self._monotonic() - before)
+            remaining -= elapsed if elapsed > 0 else sleep_for
 
     def _response_timeout(self, command_type: CommandType, payload: bytes) -> float:
         configured = max(0.0, float(self.options.timeout))
@@ -359,18 +405,15 @@ class HidBridge:
             if duration is not None:
                 self._batch_duration_seconds += duration
 
-    def _heartbeat_loop(self) -> None:
+    def _heartbeat_loop(self, serial_obj, generation: int) -> None:
         frame = encode_frame(
             0,
             CommandType.HEARTBEAT,
             flags=FLAG_NO_RESPONSE,
         )
         while not self._heartbeat_stop.wait(HEARTBEAT_INTERVAL_SECONDS):
-            serial_obj = self._serial
-            if serial_obj is None:
-                return
             try:
-                self._write_frame(serial_obj, frame)
+                self._write_frame(serial_obj, frame, generation)
             except Exception:
                 if self._heartbeat_stop.is_set():
                     return
@@ -379,8 +422,10 @@ class HidBridge:
         self._heartbeat_stop.set()
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join()
-        self._heartbeat_thread = None
+            join_timeout = max(0.1, float(self.options.timeout) + 0.1)
+            thread.join(join_timeout)
+        if thread is None or not thread.is_alive():
+            self._heartbeat_thread = None
 
     def _next_sequence(self) -> int:
         with self._sequence_lock:
@@ -394,6 +439,18 @@ class HidBridge:
         if self._serial is None or (self._closing and not allow_closing):
             raise RuntimeError("serial port is not open")
         return self._serial
+
+    def _ensure_session_generation(self, generation: int) -> None:
+        if generation != self._lifecycle_generation:
+            raise RuntimeError("serial session changed")
+
+    def _ensure_session(self, serial_obj, generation: int) -> None:
+        if (
+            generation != self._lifecycle_generation
+            or self._serial is not serial_obj
+            or self._closing
+        ):
+            raise RuntimeError("serial session changed or is closing")
 
 
 def list_ports():
@@ -423,11 +480,12 @@ def _try_decode_response(buffer: bytearray, expected_sequence: int) -> Response 
         if len(buffer) < frame_len:
             return None
         frame_bytes = bytes(buffer[:frame_len])
-        del buffer[:frame_len]
         try:
             frame = decode_frame(frame_bytes)
         except DecodeError:
+            del buffer[0]
             continue
+        del buffer[:frame_len]
         if frame.sequence != expected_sequence:
             continue
         return Response(frame.command_type, frame.payload, frame.sequence)
