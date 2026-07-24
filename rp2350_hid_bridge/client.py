@@ -251,16 +251,29 @@ class HidBridge:
 
     def run_script(self, text: str) -> None:
         commands = parse_script(text)
-        self.send_command(CommandType.BATCH_BEGIN)
         try:
+            segment: list[ScriptCommand] = []
             for command in commands:
-                self._execute_script_command(command)
-            self.send_command(CommandType.BATCH_END)
+                if command.kind == "stop":
+                    self._execute_script_batch(segment)
+                    segment.clear()
+                    self.stop_all()
+                else:
+                    segment.append(command)
+            self._execute_script_batch(segment)
         except Exception:
             try:
                 self.stop_all()
             finally:
                 raise
+
+    def _execute_script_batch(self, commands: list[ScriptCommand]) -> None:
+        if not commands:
+            return
+        self.send_command(CommandType.BATCH_BEGIN)
+        for command in commands:
+            self._execute_script_command(command)
+        self.send_command(CommandType.BATCH_END)
 
     def _send_key(self, command_type: CommandType, combo: str) -> None:
         modifier, keycode = parse_combo(combo)

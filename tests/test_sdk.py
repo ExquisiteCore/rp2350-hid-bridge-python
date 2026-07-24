@@ -147,6 +147,50 @@ class BlockingSerial(FakeSerial):
         self.release_read.set()
 
 
+class BatchAwareFakeSerial(FakeSerial):
+    def __init__(self):
+        super().__init__()
+        self.collecting = False
+        self.response_types: list[CommandType] = []
+
+    def write(self, data: bytes) -> int:
+        written = super().write(data)
+        frame = decode_frame(data)
+        response_type = CommandType.ACK
+        payload = b""
+
+        if frame.command_type == CommandType.BATCH_BEGIN:
+            if self.collecting:
+                response_type = CommandType.NACK
+                payload = b"\x0b"
+            else:
+                self.collecting = True
+        elif frame.command_type == CommandType.BATCH_END:
+            if self.collecting:
+                self.collecting = False
+            else:
+                response_type = CommandType.NACK
+                payload = b"\x0b"
+        elif frame.command_type == CommandType.STOP_ALL:
+            self.collecting = False
+
+        response = response_frame(frame.sequence, response_type, payload)
+        self.response_types.append(response_type)
+        with self._lock:
+            self._read_buffer.extend(response)
+        return written
+
+
+class WriteFailingSerial(FakeSerial):
+    def __init__(self):
+        super().__init__()
+        self.write_attempts = 0
+
+    def write(self, data: bytes) -> int:
+        self.write_attempts += 1
+        raise OSError("serial write failed")
+
+
 def response_frame(sequence: int, command_type: CommandType, payload: bytes = b"") -> bytes:
     return encode_frame(sequence, command_type, payload)
 
@@ -364,6 +408,83 @@ class DeadlineTests(unittest.TestCase):
         self.assertAlmostEqual(serial_obj.read_timeouts[batch_end_index], 3.583)
 
 
+class ScriptExecutionTests(unittest.TestCase):
+    def _run(self, script: str) -> BatchAwareFakeSerial:
+        serial_obj = BatchAwareFakeSerial()
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, timeout=0.1)
+        try:
+            bridge.run_script(script)
+        except RuntimeError as exc:
+            self.fail(f"script produced a protocol error: {exc}")
+        return serial_obj
+
+    def test_stop_at_end_executes_batch_before_stop(self):
+        serial_obj = self._run('type "abc"\nstop')
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertEqual(
+            commands,
+            [
+                CommandType.BATCH_BEGIN,
+                CommandType.TYPE_ASCII,
+                CommandType.BATCH_END,
+                CommandType.STOP_ALL,
+            ],
+        )
+        self.assertEqual(serial_obj.response_types, [CommandType.ACK] * 4)
+
+    def test_stop_in_middle_delimits_two_batches(self):
+        serial_obj = self._run('type "abc"\nstop\nwait 25')
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertEqual(
+            commands,
+            [
+                CommandType.BATCH_BEGIN,
+                CommandType.TYPE_ASCII,
+                CommandType.BATCH_END,
+                CommandType.STOP_ALL,
+                CommandType.BATCH_BEGIN,
+                CommandType.WAIT_MS,
+                CommandType.BATCH_END,
+            ],
+        )
+        self.assertEqual(serial_obj.response_types, [CommandType.ACK] * 7)
+
+    def test_stop_only_does_not_create_empty_batch(self):
+        serial_obj = self._run("stop")
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertEqual(commands, [CommandType.STOP_ALL])
+        self.assertEqual(serial_obj.response_types, [CommandType.ACK])
+
+    def test_failed_collected_command_aborts_without_batch_end(self):
+        clock = FakeClock()
+        serial_obj = FakeSerial(
+            [
+                response_frame(1, CommandType.ACK),
+                response_frame(2, CommandType.NACK, b"\x0f"),
+                response_frame(3, CommandType.ACK),
+            ],
+            clock=clock,
+        )
+        bridge = bridge_with_fake_serial(serial_obj, retries=0, clock=clock)
+
+        with self.assertRaisesRegex(RuntimeError, "keyboard busy"):
+            bridge.run_script('type "abc"\nwait 25')
+
+        commands = [decode_frame(frame).command_type for frame in serial_obj.writes]
+        self.assertEqual(
+            commands,
+            [
+                CommandType.BATCH_BEGIN,
+                CommandType.TYPE_ASCII,
+                CommandType.STOP_ALL,
+            ],
+        )
+        self.assertNotIn(CommandType.BATCH_END, commands)
+
+
 class LifecycleTests(unittest.TestCase):
     def test_open_heartbeat_and_close_lifecycle(self):
         self.assertEqual(client_module.HEARTBEAT_INTERVAL_SECONDS, 0.5)
@@ -419,14 +540,14 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(serial_obj.max_active_writes, 1)
 
     def test_close_remains_best_effort_when_stop_all_fails(self):
-        clock = FakeClock()
-        serial_obj = FakeSerial([response_frame(1, CommandType.NACK, b"\x07")], clock=clock)
-        bridge = bridge_with_fake_serial(serial_obj, retries=0, clock=clock)
+        serial_obj = WriteFailingSerial()
+        bridge = bridge_with_fake_serial(serial_obj, retries=0)
         bridge._heartbeat_thread = None
 
         bridge.close()
 
-        self.assertEqual(decode_frame(serial_obj.writes[0]).command_type, CommandType.STOP_ALL)
+        self.assertEqual(serial_obj.write_attempts, 1)
+        self.assertEqual(serial_obj.writes, [])
         self.assertEqual(serial_obj.dtr_history, [False])
         self.assertTrue(serial_obj.closed)
 

@@ -30,10 +30,10 @@ From the firmware repository:
 uv sync --project sdk/python
 ```
 
-Run tests:
+Run tests from this SDK repository:
 
 ```powershell
-uv run --project sdk/python python -m unittest discover -s sdk/python/tests -v
+uv run python -m unittest discover -s tests -v
 ```
 
 ## Find The Device
@@ -130,6 +130,10 @@ mouse wheel DELTA
 wait MILLISECONDS
 stop
 ```
+
+`stop` first completes any preceding nonempty batch, then sends `STOP_ALL`.
+Commands after a `stop` are collected into a new batch. A script containing
+only `stop` sends `STOP_ALL` without creating an empty batch.
 
 Preview the bundled script without sending input:
 
