@@ -1,11 +1,10 @@
-# RP2350 HID Bridge Python SDK
+# RP2350 HID 桥接器 Python SDK
 
-Python SDK for the ExquisiteCore RP2350 KeyMouse Bridge.
+面向 ExquisiteCore RP2350 KeyMouse Bridge 的 Python SDK。
 
-The SDK talks to the board through the CDC serial command endpoint. The board
-then emits standard USB HID keyboard and mouse reports.
+SDK 通过 CDC 串口命令端点与板卡通信，板卡随后生成标准 USB HID 键盘和鼠标报告。
 
-## Requirements
+## 环境要求
 
 ```text
 Python 3.10+
@@ -13,33 +12,31 @@ pyserial 3.5+
 Windows COM port for real device control
 ```
 
-The package can be installed independently or through the firmware repository
-submodule.
+该软件包既可以独立安装，也可以通过固件仓库中的子模块安装。
 
-## Install
+## 安装
 
-From this SDK repository:
+在本 SDK 仓库中执行：
 
 ```powershell
 uv sync
 ```
 
-From the firmware repository:
+在固件仓库中执行：
 
 ```powershell
 uv sync --project sdk/python
 ```
 
-Run tests from this SDK repository:
+在本 SDK 仓库中运行测试：
 
 ```powershell
 uv run python -m unittest discover -s tests -v
 ```
 
-## Find The Device
+## 查找设备
 
-The firmware uses VID/PID `CAFE:2350`. Passing `port=None` enables automatic
-discovery:
+固件使用 VID/PID `CAFE:2350`。传入 `port=None` 可启用自动发现：
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -48,19 +45,19 @@ with HidBridge(HidBridgeOptions(port=None)) as hid:
     hid.ping()
 ```
 
-List serial ports:
+列出串口：
 
 ```powershell
 .\.venv\Scripts\python examples\list_ports.py
 ```
 
-Run a basic protocol check:
+运行基础协议检查：
 
 ```powershell
 .\.venv\Scripts\python examples\basic.py --port COM3
 ```
 
-## Direct Control API
+## 直接控制 API
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -85,11 +82,11 @@ with HidBridge(HidBridgeOptions(port="COM3")) as hid:
     hid.stop_all()
 ```
 
-Common key names include letters, digits, `ENTER`, `ESC`, `TAB`, `SPACE`,
-`F1`-`F12`, arrows, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `DELETE`, `INSERT`,
-and punctuation names such as `SLASH`, `DOT`, `COMMA`, `BACKSLASH`.
+常用按键名包括字母、数字、`ENTER`、`ESC`、`TAB`、`SPACE`、`F1`-`F12`、
+方向键、`HOME`、`END`、`PAGEUP`、`PAGEDOWN`、`DELETE`、`INSERT`，以及
+`SLASH`、`DOT`、`COMMA`、`BACKSLASH` 等标点符号名称。
 
-Modifiers are combined with `+`:
+组合键使用 `+` 连接修饰键：
 
 ```text
 CTRL+C
@@ -98,12 +95,11 @@ ALT+TAB
 WIN+R
 ```
 
-Modifiers may also be sent without an ordinary key. For example,
-`key_down("SHIFT")` and `key_down("CTRL+SHIFT")` encode a zero keycode with
-the requested modifier mask. A combo may contain at most one ordinary key;
-use multiple `key_down` calls for simultaneous ordinary keys.
+也可以只发送修饰键而不包含普通按键。例如，`key_down("SHIFT")` 和
+`key_down("CTRL+SHIFT")` 会使用零键码和指定的修饰键掩码进行编码。一个组合键最多
+只能包含一个普通按键；如需同时按住多个普通按键，请多次调用 `key_down`。
 
-## Script API
+## 脚本 API
 
 ```python
 script = '''
@@ -119,7 +115,7 @@ with HidBridge(HidBridgeOptions(port="COM3")) as hid:
     hid.run_script(script)
 ```
 
-Supported commands:
+支持的命令：
 
 ```text
 type "ASCII text"
@@ -131,38 +127,32 @@ wait MILLISECONDS
 stop
 ```
 
-`stop` first completes any preceding nonempty batch, then sends `STOP_ALL`.
-Commands after a `stop` are collected into a new batch. A script containing
-only `stop` sends `STOP_ALL` without creating an empty batch.
+`stop` 会先完成前面非空的批处理，再发送 `STOP_ALL`。`stop` 后面的命令会进入新的
+批处理。只包含 `stop` 的脚本会发送 `STOP_ALL`，但不会创建空批处理。
 
-Preview the bundled script without sending input:
+预览随附脚本但不发送输入：
 
 ```powershell
 .\.venv\Scripts\python examples\script_demo.py
 ```
 
-Send it intentionally:
+确认后实际发送：
 
 ```powershell
 .\.venv\Scripts\python examples\script_demo.py --run --port COM3
 ```
 
-## Error Handling
+## 错误处理
 
-Protocol v2 retries only timeouts and `BUSY` responses. Every retry reuses the
-exact original sequence and encoded frame so firmware replay protection can
-distinguish a retry from a new action. A `BUSY` payload contains a one-byte
-reason followed by a two-byte big-endian retry delay in milliseconds; the SDK
-uses that advertised delay. `NACK`, serial errors, and unexpected response
-types are terminal. Malformed frames are discarded while the stream parser
-resynchronizes; if no valid matching response arrives, normal timeout retry
-policy applies. `NACK` errors include the decoded firmware error name and
-number.
+协议 v2 只会重试响应超时和 `BUSY`。每次重试都复用完全相同的原始序列号和编码帧，
+使固件的重放保护能够区分重试和新操作。`BUSY` 载荷包含一个原因字节，后接采用大端序、
+以毫秒为单位的双字节重试延迟；SDK 会使用设备给出的延迟。`NACK`、串口错误和意外
+响应类型都会立即终止当前操作。流解析器重新同步时会丢弃格式错误的帧；如果没有收到
+有效的匹配响应，则采用正常的超时重试策略。`NACK` 错误会包含解码后的固件错误名称
+和编号。
 
-Matching responses are read without clearing the serial input buffer. Complete
-responses for stale sequences are ignored, so an old response cannot satisfy
-the current request. A timeout raises `TimeoutError` after all configured retry
-attempts.
+读取匹配响应时不会清空串口输入缓冲区。属于过期序列号的完整响应会被忽略，因此旧响应
+无法满足当前请求。用完所有配置的重试次数后仍超时，会抛出 `TimeoutError`。
 
 ```python
 from rp2350_hid_bridge import HidBridge, HidBridgeOptions
@@ -176,43 +166,33 @@ except RuntimeError as exc:
     print(f"device/client error: {exc}")
 ```
 
-Read deadlines account for device-side execution: ordinary commands allow at
-least one second, waits include the requested duration plus a transport margin,
-typing uses the character count and firmware tap delay, large mouse movement
-uses its split HID report count, and `BATCH_END` includes the accumulated known
-duration of the collected script.
+读取截止时间会计入设备端执行时间：普通命令至少允许一秒；等待命令包含请求的等待时长
+和传输余量；文本输入根据字符数和固件点击延迟计算；大幅鼠标移动根据拆分后的 HID
+报告数量计算；`BATCH_END` 还包含已收集脚本累计的已知执行时长。
 
-## Protocol v2 Safety Lease
+## 协议 v2 安全租约
 
-While the port is open, the SDK sends a serialized sequence-zero `HEARTBEAT`
-frame with the `NO_RESPONSE` flag every 500 ms. Heartbeats share the command
-write lock and never read a response. They maintain the firmware's two-second
-control lease; loss of the process, serial connection, or heartbeats causes the
-firmware to release held input.
+端口打开期间，SDK 每 500 毫秒串行发送一个序列号为零且带 `NO_RESPONSE` 标志的
+`HEARTBEAT` 帧。心跳与命令共用写入锁，并且不会读取响应。心跳用于维持固件的两秒
+控制租约；进程、串口连接或心跳中断后，固件会释放所有保持中的输入。
 
-Opening explicitly asserts DTR. Orderly close sends `STOP_ALL` best-effort while
-the transport is still usable, stops and joins the heartbeat worker, deasserts
-DTR, and then closes the serial port.
+打开连接时会明确置位 DTR。正常关闭时，会在传输层仍可用的情况下尽力发送
+`STOP_ALL`，停止并等待心跳工作线程结束，取消 DTR，最后关闭串口。
 
-## Concurrency And Session Lifecycle
+## 并发与会话生命周期
 
-Commands and scripts share one command lock, so only one request/response
-exchange is active at a time and ordinary commands cannot interleave with a
-script batch. `run_script()` captures the current serial-session generation and
-checks it for every batch segment and command. If another thread closes or
-reopens the bridge, the old script fails with `RuntimeError` instead of sending
-its remaining commands through the new connection.
+命令和脚本共用一个命令锁，因此同一时间只会有一个请求/响应交换，普通命令也无法插入
+脚本批处理。`run_script()` 会记录当前串口会话代次，并在每个批处理片段和命令中
+检查。如果其他线程关闭或重新打开桥接器，旧脚本会抛出 `RuntimeError`，而不会通过
+新连接继续发送剩余命令。
 
-`close()` first marks the current generation stale and stops future heartbeat
-writes. It then sends one best-effort `STOP_ALL` while holding the serialized
-write lock, deasserts DTR, closes the serial object, and joins the heartbeat
-worker. Active reads and `BUSY` retry waits also check the session generation,
-so they exit when closing begins. `open()` refuses to start a new session while
-an old heartbeat worker is still stopping.
+`close()` 首先将当前会话代次标记为失效并停止后续心跳写入。随后它会在持有串行写入锁
+时尽力发送一次 `STOP_ALL`，取消 DTR，关闭串口对象，并等待心跳工作线程结束。活动的
+读取和 `BUSY` 重试等待也会检查会话代次，因此会在关闭开始时退出。如果旧的心跳工作
+线程仍在停止，`open()` 会拒绝启动新会话。
 
-## Notes
+## 注意事项
 
-`TYPE_ASCII` and the script `type` command support US-keyboard ASCII only; they
-do not provide Unicode or layout-independent text entry. The examples produce
-real keyboard and mouse input only when explicitly run against a device. Run
-them only when the active window is expected.
+`TYPE_ASCII` 和脚本中的 `type` 命令只支持美式键盘 ASCII，不能输入 Unicode 文本，
+也不能提供与键盘布局无关的文本输入。只有明确连接设备运行示例时，示例才会产生真实
+键盘和鼠标输入。请仅在确认活动窗口符合预期时运行。
