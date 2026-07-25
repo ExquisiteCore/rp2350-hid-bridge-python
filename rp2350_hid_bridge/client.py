@@ -20,6 +20,7 @@ from .protocol import (
     encode_frame,
     expected_response_type,
     i16_pair_payload,
+    mouse_wheel_payload,
     u32_payload,
 )
 from .script import ScriptCommand, mouse_button_mask, parse_script
@@ -267,7 +268,7 @@ class HidBridge:
         self.send_command(CommandType.MOUSE_BUTTON_UP, byte_payload(mouse_button_mask(button)))
 
     def mouse_wheel(self, delta: int) -> None:
-        self.send_command(CommandType.MOUSE_WHEEL, byte_payload(delta))
+        self.send_command(CommandType.MOUSE_WHEEL, mouse_wheel_payload(delta))
 
     def wait_ms(self, ms: int) -> None:
         self.send_command(CommandType.WAIT_MS, u32_payload(ms))
@@ -375,7 +376,7 @@ class HidBridge:
         elif command.kind == "mouse" and command.action == "wheel":
             self._send_command(
                 CommandType.MOUSE_WHEEL,
-                byte_payload(command.delta or 0),
+                mouse_wheel_payload(command.delta or 0),
                 expected_generation=expected_generation,
             )
         elif command.kind == "wait" and command.ms is not None:

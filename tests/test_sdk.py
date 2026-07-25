@@ -391,6 +391,23 @@ stop
         self.assertEqual(commands[3].ms, 100)
         self.assertEqual(commands[4].kind, "stop")
 
+    def test_script_parser_rejects_out_of_range_mouse_wheel_delta(self):
+        for delta in (-129, 128):
+            with self.subTest(delta=delta):
+                with self.assertRaisesRegex(ValueError, "mouse wheel delta"):
+                    parse_script(f"mouse wheel {delta}")
+
+    def test_mouse_wheel_rejects_out_of_range_delta_before_write(self):
+        serial_obj = FakeSerial(auto_ack=True)
+        bridge = bridge_with_fake_serial(serial_obj)
+
+        for delta in (-129, 128):
+            with self.subTest(delta=delta):
+                with self.assertRaisesRegex(ValueError, "mouse wheel delta"):
+                    bridge.mouse_wheel(delta)
+
+        self.assertEqual(serial_obj.writes, [])
+
 
 class RetryTests(unittest.TestCase):
     def test_nack_is_terminal_and_is_written_once(self):

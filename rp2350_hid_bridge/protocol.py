@@ -151,3 +151,14 @@ def u32_payload(value: int) -> bytes:
 
 def byte_payload(value: int) -> bytes:
     return bytes([int(value) & 0xFF])
+
+
+def validate_mouse_wheel_delta(delta: int) -> int:
+    value = int(delta)
+    if not -128 <= value <= 127:
+        raise ValueError("mouse wheel delta must be between -128 and 127")
+    return value
+
+
+def mouse_wheel_payload(delta: int) -> bytes:
+    return validate_mouse_wheel_delta(delta).to_bytes(1, "big", signed=True)

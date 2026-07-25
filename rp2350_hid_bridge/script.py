@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .keys import parse_combo
+from .protocol import validate_mouse_wheel_delta
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,8 @@ def _parse_mouse(parts: list[str]) -> ScriptCommand:
         return ScriptCommand(kind="mouse", action=action, button=mouse_button_mask(parts[1]))
     if action == "wheel":
         _expect_count(parts, 2, "mouse wheel expects delta")
-        return ScriptCommand(kind="mouse", action=action, delta=int(parts[1]))
+        delta = validate_mouse_wheel_delta(int(parts[1]))
+        return ScriptCommand(kind="mouse", action=action, delta=delta)
     raise ValueError(f"unknown mouse action {parts[0]}")
 
 
