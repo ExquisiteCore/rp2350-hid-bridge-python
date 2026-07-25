@@ -194,6 +194,22 @@ Opening explicitly asserts DTR. Orderly close sends `STOP_ALL` best-effort while
 the transport is still usable, stops and joins the heartbeat worker, deasserts
 DTR, and then closes the serial port.
 
+## Concurrency And Session Lifecycle
+
+Commands and scripts share one command lock, so only one request/response
+exchange is active at a time and ordinary commands cannot interleave with a
+script batch. `run_script()` captures the current serial-session generation and
+checks it for every batch segment and command. If another thread closes or
+reopens the bridge, the old script fails with `RuntimeError` instead of sending
+its remaining commands through the new connection.
+
+`close()` first marks the current generation stale and stops future heartbeat
+writes. It then sends one best-effort `STOP_ALL` while holding the serialized
+write lock, deasserts DTR, closes the serial object, and joins the heartbeat
+worker. Active reads and `BUSY` retry waits also check the session generation,
+so they exit when closing begins. `open()` refuses to start a new session while
+an old heartbeat worker is still stopping.
+
 ## Notes
 
 `TYPE_ASCII` and the script `type` command support US-keyboard ASCII only; they
