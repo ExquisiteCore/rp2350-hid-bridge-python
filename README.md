@@ -55,8 +55,22 @@ with HidSession(app_dir=app_dir) as hid:
 ## 一个 COM、一个会话
 
 一个 COM 口只能由一个原生会话拥有。键盘控制和视觉鼠标输出必须 retain/attach 同一个
-句柄，不能各自再打开 COM。主运行时 SDK 会从打开的 `HidSession` 取得内部绑定并让
-视觉 DLL retain；调用端不需要操作裸指针。
+句柄，不能各自再打开 COM。Python 主控通过公开的 `native_handle` 和 `dll_path` 把已打开
+的会话显式交给需要共享输出的组件；HID SDK 不导入、不依赖视觉 Python SDK。
+
+```python
+from cs2_vision_runtime import VisionRuntime
+
+with HidSession("COM4", app_dir=app_dir) as hid:
+    with VisionRuntime.from_app_dir(app_dir, data_dir=data_dir) as vision:
+        vision.attach_hid_session(
+            hid.native_handle,
+            hid_dll_path=hid.dll_path,
+        )
+```
+
+`native_handle` 只在 `HidSession` 已打开时有效。`dll_path` 用于确认两边使用的是同一份
+`rp2350_hid_bridge.dll`；不要缓存句柄，也不要手工加载另一份 DLL 后交叉使用句柄。
 
 `close()` 只释放当前 Python 对象拥有的一个引用，不隐式调用第二次 `STOP_ALL`。
 仍有视觉运行时引用时，心跳和调用端保持的按键继续存在。需要立即全局释放所有输入时

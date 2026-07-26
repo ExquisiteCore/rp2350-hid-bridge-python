@@ -80,8 +80,9 @@ with HidSession("COM4", app_dir=app_dir) as hid:
 
 ## 4. 与视觉运行时共享
 
-同一个 COM 口不得创建两个客户端。调用端创建并拥有一个 `HidSession`；视觉 Python
-SDK 从该对象取得内部绑定，将同一个不透明句柄交给 `vision_runtime.dll` retain。
+同一个 COM 口不得创建两个客户端。Python 主控创建并拥有一个 `HidSession`，再通过
+公开的 `native_handle` 和 `dll_path` 显式把同一个原生 session 注入视觉运行时。
+HID Python SDK 与视觉 Python SDK 是两个独立包，互不导入、互不重导出。
 
 ```text
 Python HidSession ── owns ──┐
@@ -89,11 +90,26 @@ Python HidSession ── owns ──┐
 vision_runtime.dll ─ retain ┘
 ```
 
+```python
+from rp2350_hid_bridge import HidSession
+from cs2_vision_runtime import VisionRuntime
+
+with HidSession("COM4", app_dir=app_dir) as hid:
+    with VisionRuntime.from_app_dir(app_dir, data_dir=data_dir) as vision:
+        vision.attach_hid_session(
+            hid.native_handle,
+            hid_dll_path=hid.dll_path,
+        )
+        # 视觉配置、DXGI 和处理循环
+```
+
+`native_handle` 只在 session 打开期间有效。`hid_dll_path=hid.dll_path` 让视觉 SDK 校验
+两边使用的是 EXE 同级的同一份 `rp2350_hid_bridge.dll`。不要缓存裸句柄，不要手工调用
+`ctypes.CDLL` 加载第二份中间件，也不要让视觉组件另开 COM。
+
 视觉运行时 disarm、reset、标定结束或 close 只释放视觉自己的引用，不发送全局
 `STOP_ALL`，因此调用端保持的 `W`、Shift 等键不会被误释放。全局释放只能由会话
 所有者显式调用 `hid.stop_all()`，或在最后引用释放/端口断开/固件租约超时时发生。
-
-不要自行调用 `_binding_for_runtime()`；它是两个第一方 SDK 之间的内部握手接口。
 
 ## 5. 同步调用与线程
 
