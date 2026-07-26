@@ -1,11 +1,17 @@
+import ctypes
+import dataclasses
 import inspect
+import os
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from rp2350_hid_bridge import client as client_module
+from rp2350_hid_bridge import native as native_module
 from rp2350_hid_bridge.client import HidBridge, HidBridgeOptions, _try_decode_response
 from rp2350_hid_bridge.keys import parse_combo
 from rp2350_hid_bridge.protocol import (
@@ -19,6 +25,68 @@ from rp2350_hid_bridge.protocol import (
 from rp2350_hid_bridge.script import parse_script
 
 HEARTBEAT = CommandType.HEARTBEAT
+
+
+class NativeLoaderTests(unittest.TestCase):
+    def test_native_loader_reports_all_missing_exports(self):
+        fake = SimpleNamespace(rp2350_hid_get_abi_info=lambda _value: 0)
+        with self.assertRaisesRegex(RuntimeError, "rp2350_hid_session_create"):
+            native_module._require_exports(fake, Path("old-hid.dll"))
+
+    def test_hid_abi_requires_1_0_and_shared_session_feature(self):
+        valid = native_module.HidAbiInfo(
+            abi_major=1,
+            abi_minor=0,
+            options_size=ctypes.sizeof(native_module._CHidOptions),
+            feature_flags=native_module.REQUIRED_FEATURES,
+        )
+        native_module._validate_abi(valid, Path("rp2350_hid_bridge.dll"))
+        with self.assertRaisesRegex(RuntimeError, "ABI major"):
+            native_module._validate_abi(
+                dataclasses.replace(valid, abi_major=2),
+                Path("bad.dll"),
+            )
+        with self.assertRaisesRegex(RuntimeError, "options size"):
+            native_module._validate_abi(
+                dataclasses.replace(valid, options_size=1),
+                Path("bad-options.dll"),
+            )
+        with self.assertRaisesRegex(RuntimeError, "required features"):
+            native_module._validate_abi(
+                dataclasses.replace(
+                    valid,
+                    feature_flags=native_module.FEATURE_SHARED_SESSION,
+                ),
+                Path("missing-discovery.dll"),
+            )
+
+    def test_formal_app_dir_never_falls_back_to_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_dll = root / "environment.dll"
+            environment_dll.write_bytes(b"environment")
+            missing_app = root / "app"
+            with patch.dict(
+                os.environ,
+                {"RP2350_HID_BRIDGE_DLL": str(environment_dll)},
+            ):
+                with self.assertRaisesRegex(
+                    FileNotFoundError,
+                    "app.*rp2350_hid_bridge.dll",
+                ):
+                    native_module.find_hid_dll(app_dir=missing_app)
+
+    def test_explicit_dll_path_wins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dll = Path(directory) / "custom-hid.dll"
+            dll.write_bytes(b"fake")
+            self.assertEqual(
+                native_module.find_hid_dll(
+                    app_dir=Path(directory) / "ignored",
+                    dll_path=dll,
+                ),
+                dll.resolve(),
+            )
 
 
 class FakeClock:
