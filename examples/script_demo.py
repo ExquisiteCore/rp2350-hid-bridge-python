@@ -1,6 +1,7 @@
 import argparse
+from pathlib import Path
 
-from rp2350_hid_bridge import HidBridge, HidBridgeOptions, parse_script
+from rp2350_hid_bridge import HidSession, parse_script
 
 
 SCRIPT = '''
@@ -15,7 +16,13 @@ stop
 def main():
     parser = argparse.ArgumentParser(description="Parse or run an RP2350 HID bridge script.")
     parser.add_argument("--run", action="store_true", help="send the script to the device")
-    parser.add_argument("--port", default=None, help="serial port, for example COM3")
+    parser.add_argument("--port", default="COM4", help="serial port, for example COM4")
+    parser.add_argument(
+        "--app-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="directory containing rp2350_hid_bridge.dll",
+    )
     args = parser.parse_args()
 
     if not args.run:
@@ -24,7 +31,7 @@ def main():
         print("\nUse --run --port COMx to send real HID input.")
         return
 
-    with HidBridge(HidBridgeOptions(port=args.port)) as hid:
+    with HidSession(args.port, app_dir=args.app_dir) as hid:
         hid.run_script(SCRIPT)
 
 

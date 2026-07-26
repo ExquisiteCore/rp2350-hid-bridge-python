@@ -1,14 +1,21 @@
 import argparse
+from pathlib import Path
 
-from rp2350_hid_bridge import HidBridge, HidBridgeOptions
+from rp2350_hid_bridge import HidSession
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run a basic RP2350 HID bridge protocol check.")
-    parser.add_argument("--port", default=None, help="serial port such as COM3; auto-detect when omitted")
+    parser.add_argument("--port", default="COM4", help="serial port such as COM4")
+    parser.add_argument(
+        "--app-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="directory containing rp2350_hid_bridge.dll",
+    )
     args = parser.parse_args()
 
-    with HidBridge(HidBridgeOptions(port=args.port)) as hid:
+    with HidSession(args.port, app_dir=args.app_dir) as hid:
         hid.ping()
         print("info:", hid.info().hex(" "))
         print("caps:", hid.caps().hex(" "))

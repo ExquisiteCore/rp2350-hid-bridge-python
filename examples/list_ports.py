@@ -1,21 +1,22 @@
+import argparse
+from pathlib import Path
+
 from rp2350_hid_bridge import find_port, list_ports
 
 
-def _hex_or_dash(value):
-    return f"{value:04X}" if value is not None else "----"
-
-
 def main():
-    print("device\tvid:pid\tproduct\tserial")
-    for port in list_ports():
-        vid = _hex_or_dash(getattr(port, "vid", None))
-        pid = _hex_or_dash(getattr(port, "pid", None))
-        product = getattr(port, "product", "") or ""
-        serial = getattr(port, "serial_number", "") or ""
-        print(f"{port.device}\t{vid}:{pid}\t{product}\t{serial}")
+    parser = argparse.ArgumentParser(description="Find the RP2350 HID bridge COM port.")
+    parser.add_argument(
+        "--app-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="directory containing rp2350_hid_bridge.dll",
+    )
+    args = parser.parse_args()
 
-    detected = find_port()
-    print(f"\nRP2350 bridge: {detected or 'not found'}")
+    print("matching ports:", list_ports(app_dir=args.app_dir))
+    detected = find_port(app_dir=args.app_dir)
+    print(f"RP2350 bridge: {detected or 'not found'}")
 
 
 if __name__ == "__main__":
