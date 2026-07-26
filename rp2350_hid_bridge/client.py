@@ -22,14 +22,6 @@ class HidBridgeOptions:
     pid: int = DEFAULT_PID
 
 
-@dataclass(frozen=True)
-class _NativeSessionBinding:
-    handle: int
-    dll_path: Path
-    abi_major: int
-    abi_minor: int
-
-
 class HidSession:
     def __init__(
         self,
@@ -125,17 +117,17 @@ class HidSession:
             handle = self._require_handle()
             return getattr(self._api, method)(handle, *args)
 
-    def _binding_for_runtime(self) -> _NativeSessionBinding:
+    @property
+    def native_handle(self) -> int:
         with self._lock:
             handle = self._require_handle()
             if not self._api.is_open(handle):
-                raise RuntimeError("RP2350 HID session is not open")
-            return _NativeSessionBinding(
-                handle=handle,
-                dll_path=Path(self._api.path).resolve(),
-                abi_major=int(self._api.abi_info.abi_major),
-                abi_minor=int(self._api.abi_info.abi_minor),
-            )
+                raise RuntimeError("RP2350 HID session is closed")
+            return int(handle)
+
+    @property
+    def dll_path(self) -> Path:
+        return Path(self._api.path).resolve()
 
     def ping(self) -> None:
         self._call("ping")

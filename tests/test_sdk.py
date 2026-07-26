@@ -125,11 +125,10 @@ class HidSessionTests(unittest.TestCase):
             hid.open()
             hid.key_down("W")
             hid.mouse_move(12, -4)
-            binding = hid._binding_for_runtime()
-            self.assertEqual(binding.handle, 123)
-            self.assertEqual(binding.dll_path, api.path)
-            self.assertEqual(binding.abi_major, 1)
-            self.assertEqual(binding.abi_minor, 0)
+            self.assertTrue(hasattr(type(hid), "native_handle"))
+            self.assertTrue(hasattr(type(hid), "dll_path"))
+            self.assertEqual(hid.native_handle, 123)
+            self.assertEqual(hid.dll_path, api.path)
             hid.stop_all()
 
         hid.close()
@@ -149,7 +148,8 @@ class HidSessionTests(unittest.TestCase):
         self.assertEqual(created.port, "COM4")
         self.assertEqual(created.timeout_ms, 1000)
         with self.assertRaisesRegex(RuntimeError, "closed"):
-            hid._binding_for_runtime()
+            _ = hid.native_handle
+        self.assertEqual(hid.dll_path, api.path)
 
     def test_all_commands_forward_to_one_handle(self):
         api = FakeNativeApi(Path("rp2350_hid_bridge.dll"))
